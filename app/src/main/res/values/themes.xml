@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Wear OS 使用系统默认深色主题，避免亮屏底色刺眼 -->
+    <style name="Theme.MiHomeWear" parent="android:Theme.DeviceDefault">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
