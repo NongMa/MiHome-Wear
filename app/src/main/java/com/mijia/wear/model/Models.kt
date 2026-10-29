@@ -10,7 +10,8 @@ data class DeviceInfo(
     val online: Boolean,
     val specType: String = "",
 ) {
-    /** 小爱音箱判定：与 Windows 版一致，按 model 是否含 wifispeaker。 */
+    /** 摄像头判定：model 含 camera 或 isa. */
+    val isCamera: Boolean get() = "camera" in model || "isa." in model
     val isSpeaker: Boolean get() = "wifispeaker" in model
 
     /**

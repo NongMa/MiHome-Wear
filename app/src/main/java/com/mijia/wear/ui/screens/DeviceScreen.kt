@@ -1,24 +1,44 @@
 package com.mijia.wear.ui.screens
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavHostController
@@ -33,19 +53,26 @@ import androidx.wear.compose.material.ToggleChipDefaults
 import androidx.wear.compose.material.InlineSlider
 import com.mijia.wear.model.ActionDef
 import com.mijia.wear.model.PropDef
+import com.mijia.wear.model.ValueItem
 import com.mijia.wear.repo.SpecZh
 import com.mijia.wear.ui.Mj
-import com.mijia.wear.ui.Route
 import com.mijia.wear.ui.ScreenHeader
 import com.mijia.wear.ui.mjChipColors
 import com.mijia.wear.vm.AppViewModel
+import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
-/** 摄像头拉流动作：不做成普通按钮，统一收进「实时视频」入口。 */
-private val STREAM_ACTIONS = setOf("start-rtsp-stream", "start-hls-stream", "start-p2p-stream", "stop-stream")
-
-/** 能真正取回播放地址的动作（p2p 流无地址可播，故不作为视频入口）。 */
-private val VIDEO_ENTRY_ACTIONS = setOf("start-rtsp-stream", "start-hls-stream")
+/** 摄像头拉流 START 动作：直接不展示（收进「实时视频」入口）。含后缀变体（stop-stream-6 等已单独处理）。 */
+private val VIDEO_ENTRY_ACTIONS = setOf(
+    "start-rtsp-stream",
+    "start-hls-stream",
+    "start-p2p-stream",
+)
+/**
+ * 摄像头拉流 STOP 动作不展示在详情页（stop-stream-N 这类是内部命令，
+ * UI 上重复且无意义；stopCameraStream 由 VideoScreen 离开页面时收尾）。
+ */
+private fun ActionDef.isStopStream(): Boolean = name.startsWith("stop-stream")
 
 /**
  * 属性的界面标题：**只出中文**。
@@ -108,6 +135,12 @@ private val SETTING_NAME_KEYWORDS = listOf(
     "speed-control", "max-upload", "max-download", "online-time", "rssi",
     "version", "text-content", "silent-execution", "child-lock", "indicator",
     "anti-flicker", "wiring-method", "off-delay", "static-ip", "hidden", "ota",
+    // 数值增量调节（brightness-delta / ct-delta / ct-adjust-alexa / adjust-*-cnt）
+    "delta", "adjust",
+    // 用户长按自定义功能及其关联子项（long-press-enable / -one / -two / -three / -ids-set/get）
+    "long-press",
+    // 长按场景引用的「我的模式1-4」预设定义（mode-one-bright / mode-two-ct 等）
+    "mode-one", "mode-two", "mode-three", "mode-four",
 )
 
 /** 中文描述特征（spec 的 comment 已中文化的那部分），与英文短名互为补充。 */
@@ -115,7 +148,9 @@ private val SETTING_ZH_KEYWORDS = listOf(
     "延时", "倒计时", "上电", "断电", "儿童", "童锁", "双击", "隐藏", "信道", "带宽",
     "密码", "网关", "子网", "拨号", "固件", "版本", "网络名称", "接入方式", "限速",
     "在线时长", "防闪烁", "接线", "点动", "背光", "指示灯", "提示音", "静默执行",
-    "IP地址", "DNS", "恢复默认", "上电状态",
+    "IP地址", "DNS", "恢复默认", "上电状态", "流状态", "格式化", "弹出", "读取流配置信息",
+    // 用户长按自定义功能及关联子项、数值增量调节
+    "长按", "调节",
 )
 
 private val NUM_SUFFIX = Regex("-\\d+$")
@@ -131,6 +166,14 @@ private fun isSetting(name: String, desc: String): Boolean {
 private fun PropDef.isSetting(): Boolean = isSetting(name, desc)
 
 private fun ActionDef.isSetting(): Boolean = isSetting(name, desc)
+
+/**
+ * 摄像头的主开关（siid=2, piid=1，通常是 on-2 / on）不隐藏。
+ * 其余摄像头属性/动作（夜视、录像模式、追踪、水印、格式化、弹出等）
+ * 一律视为「高级设置」，默认不显示。
+ */
+private fun PropDef.isCameraMainSwitch(): Boolean =
+    siid == 2 && piid == 1 && name.startsWith("on")
 
 /**
  * 设备详情：按 spec 自动生成控件——布尔→开关、数值→滑块、枚举→点按切换、
@@ -173,12 +216,17 @@ fun DeviceScreen(vm: AppViewModel, did: String, nav: NavHostController) {
         }
 
         detail?.let { d ->
+            val isCam = current?.isCamera ?: false
             val allProps = d.props.sortedByDescending { if (it.writable) 1 else 0 }
-            val hiddenProps = allProps.count { it.isSetting() }
-            val props = if (showAll) allProps else allProps.filterNot { it.isSetting() }
-            val allActions = d.actions.filterNot { it.name in STREAM_ACTIONS }
-            val hiddenActions = allActions.count { it.isSetting() }
-            val actions = if (showAll) allActions else allActions.filterNot { it.isSetting() }
+            val hiddenProps = allProps.count { isCam && !it.isCameraMainSwitch() || it.isSetting() }
+            val props = if (showAll) allProps
+            else allProps.filterNot { (isCam && !it.isCameraMainSwitch()) || it.isSetting() }.distinctBy { it.name }
+            val allActions = d.actions
+                .filterNot { it.name in VIDEO_ENTRY_ACTIONS }
+                .filterNot { it.isStopStream() }
+            val hiddenActions = allActions.count { isCam || it.isSetting() }
+            val actions = if (showAll) allActions
+            else allActions.filterNot { isCam || it.isSetting() }.distinctBy { it.name }
 
             props.forEach { prop ->
                 when {
@@ -224,18 +272,6 @@ fun DeviceScreen(vm: AppViewModel, did: String, nav: NavHostController) {
                         secondaryLabel = { Text("点按执行") },
                         onClick = { vm.runAction(action.name) },
                         colors = mjChipColors(),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-
-            if (d.actions.any { it.name in VIDEO_ENTRY_ACTIONS }) {
-                item(key = "video") {
-                    Chip(
-                        label = { Text("实时视频", color = Mj.AccentSoft) },
-                        secondaryLabel = { Text("摄像头画面") },
-                        onClick = { nav.navigate(Route.video(did)) },
-                        colors = mjChipColors(background = Color(0xFF16243F)),
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -311,15 +347,33 @@ private fun NumericRow(prop: PropDef, value: Any?, onValue: (Any) -> Unit) {
     val current = (value as? Number)?.toDouble() ?: min
     val label = prop.uiLabel()
 
+    val isInt = prop.type == "int" || prop.type == "uint"
+    val lo = min.toFloat()
+    val hi = max.toFloat()
+    val cur = current.toFloat().coerceIn(lo, hi)
+    val frac = ((cur - lo) / (hi - lo)).coerceIn(0f, 1f)
+
+    // 防抖：拖动时只更新本地显示值，停止拖动 400ms 后才真正下发
+    var pendingFrac by remember { mutableStateOf<Float?>(null) }
+    LaunchedEffect(pendingFrac) {
+        val f = pendingFrac ?: return@LaunchedEffect
+        delay(400)
+        val v = lo + (hi - lo) * f
+        onValue(if (isInt) v.roundToInt().coerceIn(min.roundToInt(), max.roundToInt()) else v.toDouble())
+        pendingFrac = null
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(label, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            val shownFrac = pendingFrac ?: frac
+            val shownVal = lo + (hi - lo) * shownFrac
             Text(
-                formatValue(current),
+                formatValue(if (isInt) shownVal.roundToInt() else shownVal.toDouble()),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 textAlign = TextAlign.End,
@@ -327,41 +381,130 @@ private fun NumericRow(prop: PropDef, value: Any?, onValue: (Any) -> Unit) {
             )
         }
 
-        if (prop.type == "int" || prop.type == "uint") {
-            val lo = min.roundToInt()
-            val hi = max.roundToInt()
-            val st = step.roundToInt().coerceAtLeast(1)
-            val progress = lo..hi step st
-            val v = current.roundToInt().coerceIn(lo, hi)
-            InlineSlider(
-                value = v,
-                onValueChange = { onValue(it) },
-                valueProgression = progress,
-                decreaseIcon = { Icon(StepperDefaults.Decrease, contentDescription = "减少") },
-                increaseIcon = { Icon(StepperDefaults.Increase, contentDescription = "增加") },
-                modifier = Modifier.fillMaxWidth(),
+        SwipeSlider(
+            fraction = pendingFrac ?: frac,
+            onFractionChange = { f -> pendingFrac = f },
+        )
+    }
+}
+
+/**
+ * 横向拖动滑条：手指在条上左右滑动即可调值，无需点 +/-。
+ *
+ * 手势用 [detectHorizontalDragGestures]——只有确认横向拖动才接管，
+ * 纵向滑动（列表滚动）直接放行给父级，避免上下滑屏时误触滑块。
+ */
+@Composable
+private fun SwipeSlider(
+    fraction: Float,
+    onFractionChange: (Float) -> Unit,
+) {
+    val barHeight = 8.dp
+    val thumbRadius = 9.dp
+    val gestureHeight = 44.dp
+    val density = LocalDensity.current
+    // 拖动中的实时位置（拖动时直接更新，不等外部 fraction 回流）
+    val dragPos = remember { mutableStateOf<Float?>(null) }
+    // 拖动锚点：起始手指 x 与起始值
+    val anchorX = remember { mutableStateOf(0f) }
+    val anchorFrac = remember { mutableStateOf(0f) }
+    val currentFrac by rememberUpdatedState(fraction)
+    val shown = dragPos.value ?: fraction
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(gestureHeight),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        val totalW = constraints.maxWidth.toFloat()
+        if (totalW <= 0f) return@BoxWithConstraints
+        val thumbR = with(density) { thumbRadius.toPx() }
+        // 轨道左右各内缩一个拇指半径，保证拇指始终完整可见
+        val trackW = (totalW - 2 * thumbR).coerceAtLeast(1f)
+        val thumbCenterX = thumbR + shown * trackW
+
+        // 轨道（底槽 + 渐变填充），左右内缩 thumbRadius
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .padding(start = thumbRadius, end = thumbRadius)
+                .fillMaxWidth()
+                .height(barHeight)
+        ) {
+            // 底槽：极淡描边，深色背景下轮廓更清晰
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(barHeight / 2))
+                    .background(Mj.SurfaceHigh)
+                    .border(1.dp, Mj.Stroke.copy(alpha = 0.6f), RoundedCornerShape(barHeight / 2))
             )
-        } else {
-            val lo = min.toFloat()
-            val hi = max.toFloat()
-            val steps = (((hi - lo) / step.toFloat()).roundToInt() - 1).coerceAtLeast(0)
-            InlineSlider(
-                value = current.toFloat().coerceIn(lo, hi),
-                onValueChange = { onValue(it.toDouble()) },
-                steps = steps,
-                decreaseIcon = { Icon(StepperDefaults.Decrease, contentDescription = "减少") },
-                increaseIcon = { Icon(StepperDefaults.Increase, contentDescription = "增加") },
-                valueRange = lo..hi,
-                modifier = Modifier.fillMaxWidth(),
+            // 已填充部分：品牌蓝→浅蓝渐变
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(shown)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(barHeight / 2))
+                    .background(Brush.horizontalGradient(listOf(Mj.Accent, Mj.AccentSoft)))
             )
         }
+
+        // 拇指：白底 + 描边 + 柔和阴影
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterStart)
+                .offset { IntOffset((thumbCenterX - thumbR).roundToInt(), 0) }
+                .size(thumbRadius * 2)
+                .shadow(3.dp, CircleShape)
+                .clip(CircleShape)
+                .background(Color.White)
+                .border(2.dp, Mj.Accent, CircleShape)
+        )
+
+        // 手势层：覆盖整行（含拇指）便于抓取，只响应横向拖动
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .pointerInput(trackW) {
+                    if (trackW <= 0f) return@pointerInput
+                    detectHorizontalDragGestures(
+                        onDragStart = { offset ->
+                            anchorX.value = offset.x
+                            anchorFrac.value = currentFrac
+                        },
+                        onHorizontalDrag = { change, _ ->
+                            change.consume()
+                            val f = (anchorFrac.value + (change.position.x - anchorX.value) / trackW)
+                                .coerceIn(0f, 1f)
+                            dragPos.value = f
+                            onFractionChange(f)
+                        },
+                        onDragEnd = { dragPos.value = null },
+                        onDragCancel = { dragPos.value = null },
+                    )
+                }
+        )
     }
+}
+
+/**
+ * 枚举项是否有明文（中文或可翻译成中文）。
+ * spec 里有些枚举只给内部英文代号（如 `mode-1`），翻译不出来就不显示整行。
+ */
+private fun ValueItem.hasReadableLabel(): Boolean {
+    val l = label
+    if (l.isEmpty()) return false
+    if (SpecZh.hasCjk(l)) return true
+    return SpecZh.valueZh(l) != null || SpecZh.translatePhrase(l) != null
 }
 
 @Composable
 private fun EnumRow(prop: PropDef, value: Any?, onValue: (Any) -> Unit) {
     val items = prop.valueList ?: return
     if (items.isEmpty()) return
+    // 任一子项翻译不出明文 → 整行不显示
+    if (items.any { !it.hasReadableLabel() }) return
     val current = when (value) {
         is Number -> value.toInt()
         is String -> value.toIntOrNull()

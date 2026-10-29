@@ -36,6 +36,11 @@ enum class Stage { CHECKING, NEED_LOGIN, LOGGED_IN }
  */
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
+    companion object {
+        /** 写属性/执行动作后，等待设备联动生效再回读真实状态的延迟（毫秒）。 */
+        private const val SETTLE_DELAY_MS = 1000L
+    }
+
     private val authStore = AuthStore(app)
     private val auth = XiaomiAuth(authStore)
     private val client = MiCloudClient(authStore, auth)
@@ -313,13 +318,20 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** 写属性：先乐观更新本地值，失败回滚。 */
+    /**
+     * 写属性：先乐观更新本地值，失败回滚。
+     *
+     * 成功后延迟回读一次真实状态——设备常有联动副作用（如台灯改亮度会自动开灯），
+     * 乐观值只反映「我设的目标」，不反映设备实际状态。
+     */
     fun setProp(prop: PropDef, value: Any?) = viewModelScope.launch {
         val device = _currentDevice.value ?: return@launch
         val old = _propValues.value[prop.name]
         _propValues.value = _propValues.value + (prop.name to value)
         try {
             withContext(Dispatchers.IO) { repo.setProp(device.did, prop, value) }
+            delay(SETTLE_DELAY_MS)
+            refreshProps()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -335,6 +347,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         try {
             withContext(Dispatchers.IO) { repo.runAction(device.did, action) }
             _toast.value = "已执行「${action.desc.ifEmpty { action.name }}」"
+            // 动作同样可能引发状态联动（开关灯、调模式等），执行后回读
+            delay(SETTLE_DELAY_MS)
+            refreshProps()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
